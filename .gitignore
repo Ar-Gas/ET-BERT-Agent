@@ -1,0 +1,24 @@
+# Build and Dependencies
+build/
+bin/
+third_party/onnxruntime/
+
+# Python Virtual Environment
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Models and Weights (Too large for Git)
+models/*.onnx
+models/*.onnx.data
+models/*.pt
+models/*.bin
+
+# Logs
+*.log
+waf_alerts.log
+
+# Environment Variables (SENSITIVE - NEVER COMMIT .env)
+.env
+.env.local
