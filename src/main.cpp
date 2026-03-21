@@ -88,18 +88,23 @@ int main(int argc, char** argv) {
         
         std::thread data_plane_thread([]() {
             aegis::inference::ONNXEngine ai_engine("models/et_bert_dummy.onnx");
-            aegis::capture::PcapSniffer sniffer("eth0");
+            aegis::capture::PcapSniffer sniffer("ens33");
             
-            sniffer.start_capture([&](const std::vector<uint8_t>& session_payload) {
+            static int alert_count = 0;
+
+            sniffer.start_capture([&](const std::string& src_ip, int dst_port, const std::vector<uint8_t>& session_payload) {
                 float threat_score = ai_engine.infer(session_payload);
-                if (threat_score > 0.95f) {
+                if (threat_score > 0.95f && alert_count < 1) { // Emit only once for demo
+                    alert_count++;
                     nlohmann::json notification = {
                         {"jsonrpc", "2.0"},
                         {"method", "notifications/threat_detected"},
                         {"params", {
                             {"type", "High_Threat_Detected"},
                             {"severity", "CRITICAL"},
-                            {"confidence", threat_score}
+                            {"confidence", threat_score},
+                            {"src_ip", src_ip},
+                            {"dst_port", dst_port}
                         }}
                     };
                     write_mcp_message(notification.dump());

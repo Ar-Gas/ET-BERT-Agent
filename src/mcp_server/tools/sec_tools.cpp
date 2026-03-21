@@ -50,12 +50,21 @@ namespace aegis::mcp::tools {
         int map_fd = open("/sys/fs/bpf/aegis_blacklist", O_RDWR);
         
         if (map_fd < 0) {
-            std::cerr << "[SecTools eBPF] /sys/fs/bpf/aegis_blacklist not found. (Mocking success for demo)" << std::endl;
-            co_return nlohmann::json{
-                {"status", "success"}, 
-                {"action", "eBPF BPF_MAP_UPDATE_ELEM executed (Simulated)"},
-                {"ip", ip}
-            };
+            std::cerr << "[SecTools eBPF] /sys/fs/bpf/aegis_blacklist not found. Falling back to OS iptables..." << std::endl;
+            std::string cmd = "iptables -w -A INPUT -s " + ip + " -j DROP";
+            int ret = system(cmd.c_str());
+            if (ret == 0) {
+                co_return nlohmann::json{
+                    {"status", "success"}, 
+                    {"action", "IP blocked via iptables fallback (eBPF map missing)"},
+                    {"ip", ip}
+                };
+            } else {
+                co_return nlohmann::json{
+                    {"status", "failed"}, 
+                    {"error", "iptables command failed. Need root privileges."}
+                };
+            }
         }
 
         if (mock_bpf_map_update_elem(map_fd, &target_ip, &init_val, 0) == 0) {

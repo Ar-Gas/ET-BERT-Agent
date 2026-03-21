@@ -22,3 +22,5 @@ waf_alerts.log
 # Environment Variables (SENSITIVE - NEVER COMMIT .env)
 .env
 .env.local
+.gemini
+.env.example

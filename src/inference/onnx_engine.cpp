@@ -24,16 +24,20 @@ namespace aegis::inference {
     ONNXEngine::~ONNXEngine() = default;
 
     float ONNXEngine::infer(const std::vector<uint8_t>& payload) {
-        if (!session_) return 0.0f;
+        // 由于真实的张量前向传播代码被注释，这里统一使用启发式特征匹配 (模拟 AI 边缘计算)
+        std::string data(payload.begin(), payload.end());
         
-        // 3. 真实的张量 (Tensor) 构建与推理过程:
-        // Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        // std::vector<int64_t> input_shape = {1, 512};
-        // Ort::Value input_tensor = Ort::Value::CreateTensor<int64_t>(...);
-        // auto output_tensors = session_->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
-        // float* floatarr = output_tensors.front().GetTensorMutableData<float>();
+        // 简单的恶意行为特征字典
+        const std::vector<std::string> signatures = {
+            "wget ", "curl ", "/bin/bash", "-> bash", "miner.sh", "chmod +x"
+        };
         
-        // 目前为了编译通过返回 mock 值，真实开发时填充上方张量转换代码
-        return 0.98f; 
+        for (const auto& sig : signatures) {
+            if (data.find(sig) != std::string::npos) {
+                std::cout << "[ONNXEngine] 🚨 AI Simulated Detection: Payload matched signature: '" << sig << "'\n";
+                return 0.99f; // High confidence
+            }
+        }
+        return 0.05f; // Benign
     }
 }
