@@ -17,6 +17,7 @@
 #include "mcp/handlers/mcp_handler.hh"
 
 #include "capture/pcap_sniffer.hpp"
+#include "capture/flow_tracker.hpp"
 #include "inference/onnx_engine.hpp"
 
 std::mutex cout_mtx;
@@ -85,17 +86,29 @@ int main(int argc, char** argv) {
         std::thread(run_stdio_bridge, listen_port).detach();
 
         std::cerr << "[Aegis-Agent] Starting Data Plane (Pcap & ONNXEngine) on separate thread...\n";
-        
+
+        if (!std::getenv("AEGIS_NO_DATAPLANE")) {
         std::thread data_plane_thread([]() {
             aegis::inference::ONNXEngine ai_engine("models/et_bert_dummy.onnx");
-            aegis::capture::PcapSniffer sniffer("ens33");
-            
-            static int alert_count = 0;
+            aegis::capture::FlowTracker  tracker;
+            aegis::capture::PcapSniffer  sniffer("ens33");
 
-            sniffer.start_capture([&](const std::string& src_ip, int dst_port, const std::vector<uint8_t>& session_payload) {
-                float threat_score = ai_engine.infer(session_payload);
-                if (threat_score > 0.95f && alert_count < 1) { // Emit only once for demo
-                    alert_count++;
+            int pkt_count = 0;
+
+            sniffer.start_capture([&](const std::string& src_ip, int dst_port, const std::vector<uint8_t>& raw_pkt) {
+                // 构建 FlowKey（用 src_ip + dst_port 区分流，src_port/dst_ip 未知置 0）
+                struct in_addr addr{};
+                inet_pton(AF_INET, src_ip.c_str(), &addr);
+                aegis::capture::FlowKey key{};
+                key.src_ip   = addr.s_addr;
+                key.dst_port = static_cast<uint16_t>(dst_port);
+                key.protocol = 6; // TCP
+
+                auto payload = tracker.process_packet(key, raw_pkt);
+                if (payload.empty()) return; // 还未拼装完成
+
+                float threat_score = ai_engine.infer(payload);
+                if (threat_score > 0.95f) {
                     nlohmann::json notification = {
                         {"jsonrpc", "2.0"},
                         {"method", "notifications/threat_detected"},
@@ -109,19 +122,34 @@ int main(int argc, char** argv) {
                     };
                     write_mcp_message(notification.dump());
                 }
+
+                // 每 1000 个包清理一次超过 60s 未活跃的 flow，防止内存泄漏
+                if (++pkt_count % 1000 == 0) {
+                    tracker.cleanup_stale(60);
+                }
             });
+
+            // start_capture() 正常情况下会永久阻塞（pcap_loop 无限循环）。
+            // 如果因权限失败而返回，保持线程存活以防止对象析构在非 Seastar 线程上
+            // 执行，那会破坏 Seastar 的自定义分配器 per-shard free-list。
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::hours(1));
+            }
         });
         data_plane_thread.detach();
+        }
 
         seastar::promise<> stop_signal;
         // 修复废弃的 handle_signal 警告 (用 engine().handle_signal 是因为 Seastar 版本兼容性)
         seastar::engine().handle_signal(SIGINT, [&] { stop_signal.set_value(); });
         seastar::engine().handle_signal(SIGTERM, [&] { stop_signal.set_value(); });
         co_await stop_signal.get_future();
-        
+
         std::cerr << "[Aegis-Agent] Shutting down...\n";
-        co_await server->stop();
-        server.reset();
-        std::exit(0); 
+        // 直接退出，不调用 server->stop()。
+        // 原因：detach 的 stdio_bridge 线程仍在运行，Seastar 拦截了全局 operator new，
+        // 调用 server->stop() 会在 reactor 关闭时与该线程的分配操作冲突导致崩溃。
+        // std::exit(0) 跳过局部对象析构，安全退出。
+        std::exit(0);
     });
 }

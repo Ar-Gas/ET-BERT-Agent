@@ -2,6 +2,7 @@ import subprocess
 import json
 import time
 import os
+import threading
 from dotenv import load_dotenv
 
 from langchain_core.tools import tool
@@ -14,7 +15,31 @@ from typing import TypedDict
 # 加载环境变量
 load_dotenv()
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "deepseek-chat")
+MODEL_NAME         = os.environ.get("MODEL_NAME", "deepseek-chat")
+DEDUP_WINDOW_SECS  = int(os.environ.get("AEGIS_DEDUP_WINDOW", "60"))
+
+
+class AlertDedup:
+    """同一 IP 在时间窗口内只触发一次调查，防止告警风暴耗尽 LLM 配额。"""
+    def __init__(self, window_seconds: int = 60):
+        self._window = window_seconds
+        self._seen: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def should_process(self, ip: str) -> bool:
+        now = time.time()
+        with self._lock:
+            last = self._seen.get(ip, 0.0)
+            if now - last < self._window:
+                return False
+            self._seen[ip] = now
+            # 顺带清理过期条目，防止长期运行内存泄漏
+            cutoff = now - self._window * 10
+            self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+            return True
+
+
+_dedup = AlertDedup(window_seconds=DEDUP_WINDOW_SECS)
 
 class CppProbeWrapper:
     def __init__(self, mock=False):
@@ -111,11 +136,16 @@ class CppProbeWrapper:
             return {"error": str(e)}
 
     def listen_for_alerts(self, callback):
-        self.alert_callback = callback
+        def dedup_callback(ip, port, score):
+            if not _dedup.should_process(ip):
+                print(f"[Python Agent] 去重过滤：{ip} 在窗口内已处理，跳过。")
+                return
+            callback(ip, port, score)
+        self.alert_callback = dedup_callback
         if self.mock:
             print("[Python Agent] Mock 模式：3秒后模拟一次告警...")
             time.sleep(3)
-            callback("1.2.3.4", 443, 0.99)
+            dedup_callback("1.2.3.4", 443, 0.99)
 
     def call_tool(self, name, arguments):
         if self.mock:

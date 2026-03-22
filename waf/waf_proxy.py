@@ -1,4 +1,3 @@
-import onnxruntime as ort
 import numpy as np
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
@@ -7,23 +6,74 @@ import uvicorn
 import time
 import os
 
+try:
+    import onnxruntime as ort
+    _ort_available = True
+except ImportError:
+    _ort_available = False
+
 app = FastAPI(title="Aegis-WAF-Proxy")
 
-# 1. 配置真实后端服务器的地址 (我们稍后会在 8080 端口启动一个测试后端)
+# 1. 配置真实后端服务器的地址
 BACKEND_TARGET_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8080")
+WAF_MODEL_PATH     = os.environ.get("WAF_MODEL_PATH", "../models/et_bert_dummy.onnx")
 
 # 2. 全局复用：高性能异步 HTTP 客户端
 http_client = httpx.AsyncClient(base_url=BACKEND_TARGET_URL, timeout=60.0)
 
 # 加载 ET-BERT 模型
 print("[WAF] 初始化 Aegis 反向代理防火墙...")
-try:
-    # 尝试加载模型，如果失败则使用规则引擎作为降级方案
-    ort_session = ort.InferenceSession("../models/et_bert_dummy.onnx")
-    print("[WAF] ET-BERT ONNX 引擎加载成功。")
-except Exception as e:
-    print(f"[WAF] AI 模型加载失败，自动降级为【启发式规则引擎模式】。原因: {e}")
-    ort_session = None
+ort_session   = None
+_input_names  = []   # 在 try 块外初始化，防止加载失败时 NameError
+_output_names = []
+
+if _ort_available:
+    try:
+        _sess_opts = ort.SessionOptions()
+        _sess_opts.intra_op_num_threads = 1
+        _sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        ort_session   = ort.InferenceSession(WAF_MODEL_PATH, _sess_opts)
+        _input_names  = [i.name for i in ort_session.get_inputs()]
+        _output_names = [o.name for o in ort_session.get_outputs()]
+        print(f"[WAF] ET-BERT ONNX 引擎加载成功。inputs={_input_names} outputs={_output_names}")
+    except Exception as e:
+        print(f"[WAF] AI 模型加载失败，自动降级为【启发式规则引擎模式】。原因: {e}")
+else:
+    print("[WAF] onnxruntime 未安装，使用规则引擎模式。")
+
+
+def _tokenize(text: str, max_len: int = 512):
+    """byte-level BERT 编码：0=PAD, 1=CLS, 2=SEP, 3+byte_val=token"""
+    raw = text.encode("utf-8", errors="replace")
+    ids = [1] + [b + 3 for b in raw[:max_len - 2]] + [2]
+    mask = [1] * len(ids)
+    ids  += [0] * (max_len - len(ids))
+    mask += [0] * (max_len - len(mask))
+    return (np.array([ids],  dtype=np.int64),
+            np.array([mask], dtype=np.int64))
+
+
+def _onnx_score(raw: str) -> float:
+    """调用 ONNX 模型返回威胁概率 [0,1]，失败返回 -1"""
+    if ort_session is None or not _input_names:
+        return -1.0
+    try:
+        ids, mask = _tokenize(raw)
+        feed = {_input_names[0]: ids}
+        if len(_input_names) >= 2:
+            feed[_input_names[1]] = mask
+        out = ort_session.run(_output_names[:1], feed)[0]  # shape [1, n_class] or [1]
+        logits = out.flatten()
+        if len(logits) == 1:
+            import math
+            return float(1.0 / (1.0 + math.exp(-logits[0])))
+        # softmax，取最后一列（威胁类）
+        logits = logits - logits.max()
+        exp_l  = np.exp(logits)
+        return float(exp_l[-1] / exp_l.sum())
+    except Exception as e:
+        print(f"[WAF] ONNX 推理异常: {e}")
+        return -1.0
 
 def extract_http_features(request: Request, body: bytes) -> str:
     """将 HTTP 请求还原为文本特征"""
@@ -31,23 +81,34 @@ def extract_http_features(request: Request, body: bytes) -> str:
     raw_http = f"{request.method} {request.url.path + ("?" + request.url.query if request.url.query else "")} HTTP/1.1\n{headers_str}\n\n{body.decode(errors='ignore')}"
     return raw_http
 
+_HIGH_RISK_SIGS = [
+    ("union select", 0.99),
+    ("1=1", 0.97),
+    ("<script>", 0.98),
+    ("javascript:", 0.97),
+    ("cmd.exe", 0.99),
+    ("/etc/passwd", 0.99),
+    ("../../../", 0.96),
+    ("wget ", 0.95),
+    ("curl ", 0.95),
+    ("base64 -d", 0.96),
+]
+
 async def ai_threat_detection(raw_http: str) -> float:
-    """调用 ET-BERT 或规则引擎进行高危打分"""
+    """规则引擎快速路径 + ET-BERT ONNX 推理"""
     raw_lower = raw_http.lower()
-    
-    # 模拟 AI 发现 SQL 注入或 XSS 攻击特征
-    if "union select" in raw_lower or "1=1" in raw_lower:
-        return 0.99  # 极高危：SQL 注入
-    elif "<script>" in raw_lower or "javascript:" in raw_lower:
-        return 0.98  # 高危：XSS 跨站脚本
-    elif "cmd.exe" in raw_lower or "/etc/passwd" in raw_lower:
-        return 0.99  # 极高危：命令注入 / 任意文件读取
-        
-    if ort_session:
-        # 如果模型存在，这里是真正的张量推理逻辑
-        return 0.01 
-        
-    return 0.01 # 安全放行
+
+    # 快速路径：签名命中直接返回
+    for sig, score in _HIGH_RISK_SIGS:
+        if sig in raw_lower:
+            return score
+
+    # AI 路径：ONNX 推理
+    model_score = _onnx_score(raw_http)
+    if model_score >= 0.0:
+        return model_score
+
+    return 0.01  # 安全放行
 
 # 3. 核心拦截器：接管所有 HTTP 方法和路径
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])

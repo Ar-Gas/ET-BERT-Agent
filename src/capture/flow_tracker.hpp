@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
+#include <chrono>
 
 namespace aegis::capture {
     struct FlowKey {
@@ -10,23 +11,34 @@ namespace aegis::capture {
         uint16_t src_port, dst_port;
         uint8_t protocol;
 
-        bool operator==(const FlowKey& other) const {
-            return src_ip == other.src_ip && dst_ip == other.dst_ip &&
-                   src_port == other.src_port && dst_port == other.dst_port &&
-                   protocol == other.protocol;
+        bool operator==(const FlowKey& o) const {
+            return src_ip == o.src_ip && dst_ip == o.dst_ip &&
+                   src_port == o.src_port && dst_port == o.dst_port &&
+                   protocol == o.protocol;
         }
+    };
+
+    struct FlowState {
+        std::vector<uint8_t> buffer;
+        std::chrono::steady_clock::time_point last_seen;
     };
 }
 
-// 注入 std::hash 以支持 unordered_map
+// 注入 std::hash — 使用 Boost hash_combine 模式，避免简单 XOR 的高碰撞率
 namespace std {
     template <>
     struct hash<aegis::capture::FlowKey> {
         size_t operator()(const aegis::capture::FlowKey& k) const {
-            // 简单的组合哈希算法
-            return ((hash<uint32_t>()(k.src_ip) ^ (hash<uint32_t>()(k.dst_ip) << 1)) >> 1) ^
-                   (hash<uint16_t>()(k.src_port) << 1) ^ (hash<uint16_t>()(k.dst_port) << 2) ^
-                   (hash<uint8_t>()(k.protocol) << 3);
+            size_t seed = 0;
+            auto combine = [&](size_t v) {
+                seed ^= v + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            };
+            combine(hash<uint32_t>()(k.src_ip));
+            combine(hash<uint32_t>()(k.dst_ip));
+            combine(hash<uint16_t>()(k.src_port));
+            combine(hash<uint16_t>()(k.dst_port));
+            combine(hash<uint8_t>()(k.protocol));
+            return seed;
         }
     };
 }
@@ -34,10 +46,16 @@ namespace std {
 namespace aegis::capture {
     class FlowTracker {
     public:
-        // 核心接口：输入报文，如果拼装完成则返回 payload，否则返回空
+        // 输入报文，拼装完成（>=512字节）时返回 payload，否则返回空
         std::vector<uint8_t> process_packet(const FlowKey& key, const std::vector<uint8_t>& pkt);
+
+        // 清理超过 timeout_seconds 未活跃的 flow，防止内存无限增长
+        void cleanup_stale(int timeout_seconds);
+
+        size_t active_flow_count() const { return active_flows_.size(); }
+
     private:
-        std::unordered_map<FlowKey, std::vector<uint8_t>> active_flows_;
-        const size_t MAX_FLOW_BUFFER = 4096; // 最大缓存 4KB 用于 AI 推理即可
+        std::unordered_map<FlowKey, FlowState> active_flows_;
+        static constexpr size_t MAX_FLOW_BUFFER = 4096;
     };
 }

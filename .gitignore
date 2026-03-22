@@ -24,3 +24,6 @@ waf_alerts.log
 .env.local
 .gemini
 .env.example
+.bashrc
+.bash_profile
+.claude

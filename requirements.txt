@@ -1,0 +1,24 @@
+# Aegis-Agent Python dependencies
+# Install: pip install -r requirements.txt
+
+# LangChain ecosystem
+langchain>=0.2.0
+langchain-openai>=0.1.20
+langchain-community>=0.2.0
+langgraph>=0.1.0
+
+# Vector store
+faiss-cpu>=1.8.0
+
+# HTTP & utilities
+requests>=2.32.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
+
+# WAF proxy
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# ONNX inference (WAF inline model)
+onnxruntime>=1.18.0
+numpy>=1.26.0

@@ -1,78 +1,84 @@
 #include "sec_tools.hpp"
-#include <cstdlib>
 #include <iostream>
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
 #include <seastar/core/coroutine.hh>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
-
-// Mock bpf system call structure
-union mock_bpf_attr {
-    struct {
-        int map_fd;
-        uint64_t key;
-        uint64_t value;
-        uint64_t flags;
-    };
-};
-
-static int mock_bpf_map_update_elem(int fd, const void *key, const void *value, uint64_t flags) {
-    union mock_bpf_attr attr = {};
-    attr.map_fd = fd;
-    attr.key = reinterpret_cast<uint64_t>(key);
-    attr.value = reinterpret_cast<uint64_t>(value);
-    attr.flags = flags;
-    // syscall(__NR_bpf, 2, &attr, sizeof(attr));
-    return 0; // Simulated success
-}
+#include <sys/wait.h>
+#include <linux/bpf.h>
+#include <cstring>
+#include <cerrno>
 
 namespace aegis::mcp::tools {
-    seastar::future<nlohmann::json> SecTools::execute(const nlohmann::json& args) {
-        std::string ip = args["ip"];
 
-        // ==========================
-        // The Ultimate Security Upgrade: Zero OS Command Injection
-        // Using Kernel eBPF Map Update via syscall
-        // ==========================
-        struct sockaddr_in sa;
-        if (inet_pton(AF_INET, ip.c_str(), &(sa.sin_addr)) == 0) {
-            std::cerr << "[SecTools] Invalid IP format: " << ip << std::endl;
+    // 通过原始 bpf(2) syscall 向 pinned BPF map 写入黑名单 IP
+    static bool raw_bpf_map_update(int map_fd, uint32_t key, uint32_t value) {
+        union bpf_attr attr{};
+        attr.map_fd = static_cast<__u32>(map_fd);
+        attr.key    = reinterpret_cast<__u64>(&key);
+        attr.value  = reinterpret_cast<__u64>(&value);
+        attr.flags  = BPF_ANY;
+        return ::syscall(__NR_bpf, BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr)) == 0;
+    }
+
+    // 通过 fork+execv 调用 iptables，无 shell，消除注入风险
+    static bool iptables_block(const std::string& ip) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            std::cerr << "[SecTools] fork() failed: " << strerror(errno) << "\n";
+            return false;
+        }
+        if (pid == 0) {
+            // 子进程
+            const char* args[] = {
+                "/sbin/iptables", "-w", "-A", "INPUT",
+                "-s", ip.c_str(), "-j", "DROP", nullptr
+            };
+            execv("/sbin/iptables", const_cast<char**>(args));
+            _exit(1); // execv 失败时退出
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+
+    seastar::future<nlohmann::json> SecTools::execute(const nlohmann::json& args) {
+        std::string ip = args.value("ip", "");
+
+        // 验证 IPv4 格式
+        struct sockaddr_in sa{};
+        if (inet_pton(AF_INET, ip.c_str(), &sa.sin_addr) != 1) {
+            std::cerr << "[SecTools] Invalid IP: " << ip << "\n";
             co_return nlohmann::json{{"status", "failed"}, {"error", "Invalid IPv4 format."}};
         }
 
         uint32_t target_ip = sa.sin_addr.s_addr;
-        uint32_t init_val = 1;
+        uint32_t value     = 1;
 
-        std::cout << "[SecTools eBPF] MCP Agent commanded to drop IP: " << ip << std::endl;
-        std::cout << "[SecTools eBPF] Injecting IP directly into Kernel XDP BPF Map..." << std::endl;
+        std::cout << "[SecTools] Blocking IP: " << ip << "\n";
 
+        // 优先尝试 eBPF XDP map
         int map_fd = open("/sys/fs/bpf/aegis_blacklist", O_RDWR);
-        
-        if (map_fd < 0) {
-            std::cerr << "[SecTools eBPF] /sys/fs/bpf/aegis_blacklist not found. Falling back to OS iptables..." << std::endl;
-            std::string cmd = "iptables -w -A INPUT -s " + ip + " -j DROP";
-            int ret = system(cmd.c_str());
-            if (ret == 0) {
+        if (map_fd >= 0) {
+            bool ok = raw_bpf_map_update(map_fd, target_ip, value);
+            close(map_fd);
+            if (ok) {
                 co_return nlohmann::json{
-                    {"status", "success"}, 
-                    {"action", "IP blocked via iptables fallback (eBPF map missing)"},
-                    {"ip", ip}
-                };
-            } else {
-                co_return nlohmann::json{
-                    {"status", "failed"}, 
-                    {"error", "iptables command failed. Need root privileges."}
-                };
+                    {"status", "success"}, {"method", "ebpf_xdp"}, {"ip", ip}};
             }
+            std::cerr << "[SecTools] eBPF map update failed, falling back to iptables\n";
         }
 
-        if (mock_bpf_map_update_elem(map_fd, &target_ip, &init_val, 0) == 0) {
-            close(map_fd);
-            co_return nlohmann::json{{"status", "success"}, {"action", "IP added to Kernel eBPF Map."}};
-        } else {
-            close(map_fd);
-            co_return nlohmann::json{{"status", "failed"}, {"error", "eBPF Map update failed. Missing root?"}};
+        // Fallback: iptables via fork+execv
+        if (iptables_block(ip)) {
+            co_return nlohmann::json{
+                {"status", "success"}, {"method", "iptables_fallback"}, {"ip", ip}};
         }
+
+        co_return nlohmann::json{
+            {"status", "failed"},
+            {"error", "Both eBPF and iptables failed. Need root privileges."}};
     }
+
 }
