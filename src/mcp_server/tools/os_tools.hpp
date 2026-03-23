@@ -1,10 +1,10 @@
 #pragma once
 #include <string>
 #include <nlohmann/json.hpp>
-#include "mcp/interfaces.hh"
+#include "mcp/core/interfaces.hh"
 
 namespace aegis::mcp::tools {
-    class OSTools : public ::mcp::interfaces::McpTool {
+    class OSTools : public ::mcp::core::McpTool {
     public:
         std::string get_name() const override { return "analyze_process_behavior"; }
         
@@ -14,7 +14,7 @@ namespace aegis::mcp::tools {
                 {"inputSchema", {
                     {"type", "object"},
                     {"properties", {
-                        {"pid", {"type", "integer", "description", "The Process ID (PID) to inspect."}}
+                        {"pid", {{"type", "integer"}, {"description", "The Process ID (PID) to inspect."}}}
                     }},
                     {"required", {"pid"}}
                 }}

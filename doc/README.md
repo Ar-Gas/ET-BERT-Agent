@@ -20,6 +20,8 @@
 | [配置参考](deployment/configuration.md) | 所有环境变量及默认值 |
 | [测试指南](development/testing.md) | 单元测试、集成测试、端到端测试 |
 
+MCP-Server SDK 文档见 [`third_party/MCP-Server/docs/`](../third_party/MCP-Server/docs/)（架构、Transport、API 参考等）。
+
 ---
 
 ## 快速索引
@@ -27,7 +29,7 @@
 ```
 aegis-agent/
 ├── src/                    # C++ 数据平面 & MCP 服务器
-│   ├── main.cpp            # 三线程启动入口
+│   ├── main.cpp            # 启动入口：McpServerBuilder + data_plane 线程
 │   ├── capture/            # 流量捕获 & 流重组
 │   ├── inference/          # ONNX ET-BERT 推理
 │   ├── ebpf/               # XDP 内核程序 & 加载器
@@ -38,7 +40,32 @@ aegis-agent/
 ├── waf/
 │   └── waf_proxy.py        # FastAPI WAF 反向代理
 ├── models/                 # ET-BERT ONNX 模型文件
-├── third_party/            # Seastar / ONNX Runtime / MCP-Server
+├── third_party/
+│   ├── MCP-Server/         # Seastar MCP C++ SDK（mcp::McpServerBuilder API）
+│   └── onnxruntime/        # ONNX Runtime C++ API
 └── doc/                    # 本文档目录
     └── test_log/           # 攻击测试日志 (独立维护)
+```
+
+---
+
+## MCP Server 关键 API（速查）
+
+```cpp
+// 引入
+#include "mcp/mcp.hh"
+
+// 工具基类（继承此类实现业务工具）
+class MyTool : public mcp::core::McpTool { ... };
+
+// 服务器构建（main.cpp 中使用的模式）
+auto server = mcp::McpServerBuilder()
+    .name("aegis-mcp-server").version("1.0.0")
+    .with_http(8080)    // HTTP+SSE
+    .with_stdio()       // StdIO（供 Python 子进程通信）
+    .add_tool<NetTools>().add_tool<OSTools>().add_tool<SecTools>()
+    .build();
+co_await server->start();
+// ...
+co_await server->stop();  // StdioTransport 可正常 join，安全退出
 ```

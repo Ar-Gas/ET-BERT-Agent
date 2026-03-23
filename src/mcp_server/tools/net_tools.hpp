@@ -1,10 +1,10 @@
 #pragma once
 #include <string>
 #include <nlohmann/json.hpp>
-#include "mcp/interfaces.hh" // 引入第三方的 MCP Tool 接口
+#include "mcp/core/interfaces.hh"
 
 namespace aegis::mcp::tools {
-    class NetTools : public ::mcp::interfaces::McpTool {
+    class NetTools : public ::mcp::core::McpTool {
     public:
         std::string get_name() const override { return "get_pid_by_connection"; }
         
@@ -14,8 +14,8 @@ namespace aegis::mcp::tools {
                 {"inputSchema", {
                     {"type", "object"},
                     {"properties", {
-                        {"ip", {"type", "string", "description", "The IPv4 address (e.g., 1.2.3.4)"}},
-                        {"port", {"type", "integer", "description", "The network port number (e.g., 443)"}}
+                        {"ip",   {{"type", "string"},  {"description", "The IPv4 address (e.g., 1.2.3.4)"}}},
+                        {"port", {{"type", "integer"}, {"description", "The network port number (e.g., 443)"}}}
                     }},
                     {"required", {"ip", "port"}}
                 }}

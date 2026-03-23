@@ -29,8 +29,9 @@
 │   ┌─────────┼──────────────────────────┼─────────────────────────────────┐   │
 │   │  LAYER 2   C++ 控制面 — Seastar MCP Server (port 8080)               │   │
 │   │             ▲                      │                                  │   │
-│   │   stdio-bridge thread              │                                  │   │
-│   │   (JSON-RPC 转发)                  │                                  │   │
+│   │   StdioTransport                   │                                  │   │
+│   │   (seastar::thread，                │                                  │   │
+│   │    直读 stdin/直写 stdout)           │                                  │   │
 │   │                               ┌────▼─────────────────────────────┐   │   │
 │   │                               │  MCP Tool Registry               │   │   │
 │   │                               │  ┌──────────┐ ┌───────────────┐  │   │   │
@@ -219,15 +220,15 @@ payload (512 bytes)
   │  Seastar Reactor 线程（主线程）                      │
   │  • 运行 McpServer HTTP 服务 (port 8080)              │
   │  • 处理所有 HTTP accept/read/write（协程，无阻塞）   │
-  │  • 接收 SIGINT/SIGTERM → std::exit(0)               │
+  │  • 接收 SIGINT/SIGTERM → co_await server->stop()    │
   │  ⚠ 所有 Seastar 对象只能在此线程访问                │
   └─────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────┐
-  │  stdio_bridge 线程（detached）                      │
-  │  • 从 stdin 读 JSON-RPC 请求行                      │
-  │  • 建 TCP socket → POST /message → 读响应 → stdout  │
-  │  • 仅使用 POSIX syscalls，不访问 Seastar 对象        │
+  │  StdioTransport（seastar::thread，可正常 join）      │
+  │  • 在 Seastar 纤程内读 stdin / 写 stdout            │
+  │  • 通过 shards.local().dispatch() 分发请求          │
+  │  • server->stop() 时自动 join，不会与 Reactor 冲突  │
   └─────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────┐
@@ -238,7 +239,7 @@ payload (512 bytes)
   │  ⚠ 线程必须永不退出，否则本地对象析构 → 分配器崩溃   │
   └─────────────────────────────────────────────────────┘
 
-  安全退出：std::exit(0)（跳过局部析构，避免与 Seastar 分配器冲突）
+  安全退出：co_await server->stop()（StdioTransport 可 join，data_plane 处于 sleep 不冲突）
 ```
 
 #### MCP Server 请求路由
@@ -407,10 +408,11 @@ aegis-agent/
 │       └── xdp_loader.{hpp,cpp}        # libbpf XDP 程序加载（可选编译）
 ├── third_party/
 │   ├── MCP-Server/                     # Seastar HTTP + JSON-RPC 2.0 框架
-│   │   ├── include/mcp/server/         # McpServer, SseSession
-│   │   ├── include/mcp/router/         # JsonRpcDispatcher
-│   │   ├── include/mcp/interfaces.hh   # McpTool / McpResource / McpPrompt 抽象接口
-│   │   └── src/mcp/handlers/           # McpHandler：路由注册 + 工具注入点
+│   │   ├── include/mcp/mcp.hh          # SDK 单一公共入口
+│   │   ├── include/mcp/core/           # McpTool / McpResource / McpPrompt 抽象接口 + Registry + Builder
+│   │   ├── include/mcp/transport/      # StdioTransport / HttpSseTransport / StreamableHttpTransport
+│   │   ├── include/mcp/server/         # McpServer + McpShard（sharded 多核架构）
+│   │   └── src/mcp/server/             # mcp_server.cc + seastar_patches/
 │   └── onnxruntime/                    # ONNX Runtime C++ API（本地绿色安装）
 ├── models/
 │   ├── et_bert_dummy.onnx              # 模型元数据（小文件）
@@ -430,6 +432,7 @@ aegis-agent/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `AEGIS_INTERFACE` | `ens33` | 监听网卡名 |
+| `AEGIS_MCP_PORT` | `8080` | MCP HTTP+SSE 服务端口 |
 | `AEGIS_MODEL` | `models/et_bert_dummy.onnx` | ONNX 模型路径 |
 | `AEGIS_THRESHOLD` | `0.95` | 触发告警的威胁评分阈值 |
 | `AEGIS_DEDUP_WINDOW` | `60` | 告警去重窗口（秒） |

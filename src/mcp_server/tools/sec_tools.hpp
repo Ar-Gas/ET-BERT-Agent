@@ -1,10 +1,10 @@
 #pragma once
 #include <string>
 #include <nlohmann/json.hpp>
-#include "mcp/interfaces.hh"
+#include "mcp/core/interfaces.hh"
 
 namespace aegis::mcp::tools {
-    class SecTools : public ::mcp::interfaces::McpTool {
+    class SecTools : public ::mcp::core::McpTool {
     public:
         std::string get_name() const override { return "block_malicious_ip"; }
         
@@ -14,7 +14,7 @@ namespace aegis::mcp::tools {
                 {"inputSchema", {
                     {"type", "object"},
                     {"properties", {
-                        {"ip", {"type", "string", "description", "The malicious IPv4 address to block."}}
+                        {"ip", {{"type", "string"}, {"description", "The malicious IPv4 address to block."}}}
                     }},
                     {"required", {"ip"}}
                 }}

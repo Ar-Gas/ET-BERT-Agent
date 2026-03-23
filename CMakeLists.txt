@@ -30,7 +30,10 @@ include_directories(
 
 # 4. 收集源文件
 file(GLOB_RECURSE SRC_FILES "src/*.cpp")
-set(MCP_SERVER_SRC "third_party/MCP-Server/src/mcp/handlers/mcp_handler.cc")
+set(MCP_SERVER_SRC
+    "third_party/MCP-Server/src/mcp/server/mcp_server.cc"
+    "third_party/MCP-Server/src/seastar_patches/http_common_patch.cc"
+)
 
 # 5. 生成可执行文件
 add_executable(aegis_agent ${SRC_FILES} ${MCP_SERVER_SRC})
